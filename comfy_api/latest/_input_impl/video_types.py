@@ -96,6 +96,18 @@ def video_stream_bit_depth(stream) -> int:
     return max(component.bits for component in stream.format.components)
 
 
+def apply_isobmff_hevc_tag(output_container, out_stream, template) -> None:
+    """Retag HEVC from FFmpeg's default 'hev1' to 'hvc1' so Apple players accept it.
+    Dolby Vision tags are kept as is since they need DV config boxes to be muxed."""
+    if output_container.format.name not in ("mp4", "mov"):
+        return
+    codec_context = template.codec_context
+    if codec_context.name != "hevc" or codec_context.codec_tag in ("dvh1", "dvhe"):
+        return
+    if codec_context.extradata:
+        out_stream.codec_context.codec_tag = "hvc1"
+
+
 def last_decodable_audio_stream(container: InputContainer):
     """Streams FFmpeg has no decoder for have no codec context, and decoding their
     packets crashes the process (e.g. APAC spatial-audio track in iPhone)."""
@@ -607,6 +619,7 @@ class VideoFromFile(VideoInput):
                             logging.warning("Skipping %s stream %d with unsupported codec", stream.type, stream.index)
                             continue
                         out_stream = output_container.add_stream_from_template(template=stream, opaque=True)
+                        apply_isobmff_hevc_tag(output_container, out_stream, stream)
                         stream_map[stream] = out_stream
 
                 # Write packets to the new container

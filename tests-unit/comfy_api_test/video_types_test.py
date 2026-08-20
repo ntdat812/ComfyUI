@@ -1275,6 +1275,62 @@ def test_save_to_transcode_bakes_rotation():
         os.unlink(file_path)
 
 
+def hevc_encoder_available():
+    try:
+        av.Codec("libx265", "w")
+        return True
+    except av.codec.codec.UnknownCodecError:
+        return False
+
+
+def create_hevc_mp4(codec_tag=None):
+    """In-memory HEVC mp4; FFmpeg's mp4 muxer tags it 'hev1' unless codec_tag is given."""
+    buffer = io.BytesIO()
+    with av.open(buffer, mode="w", format="mp4") as container:
+        stream = container.add_stream("libx265", rate=30)
+        stream.width = 64
+        stream.height = 64
+        stream.pix_fmt = "yuv420p"
+        if codec_tag is not None:
+            stream.codec_context.codec_tag = codec_tag
+        for i in range(3):
+            frame = av.VideoFrame.from_ndarray(
+                torch.ones(64, 64, 3, dtype=torch.uint8).numpy() * (i * 85),
+                format="rgb24",
+            ).reformat(format="yuv420p")
+            for packet in stream.encode(frame):
+                container.mux(packet)
+        for packet in stream.encode():
+            container.mux(packet)
+    buffer.seek(0)
+    return buffer
+
+
+def remuxed_video_tag(source: io.BytesIO) -> str:
+    output = io.BytesIO()
+    VideoFromFile(source).save_to(output)
+    output.seek(0)
+    with av.open(output) as container:
+        return container.streams.video[0].codec_context.codec_tag
+
+
+@pytest.mark.skipif(not hevc_encoder_available(), reason="libx265 encoder not available")
+def test_save_to_remux_retags_hevc_as_hvc1():
+    """Remuxed HEVC gets the 'hvc1' sample entry instead of FFmpeg's default 'hev1',
+    which Apple players refuse to play."""
+    source = create_hevc_mp4()
+    with av.open(io.BytesIO(source.getvalue())) as container:
+        assert container.streams.video[0].codec_context.codec_tag == "hev1"
+    assert remuxed_video_tag(source) == "hvc1"
+
+
+@pytest.mark.skipif(not hevc_encoder_available(), reason="libx265 encoder not available")
+def test_save_to_remux_leaves_dolby_vision_untagged():
+    """Dolby Vision streams keep the muxer default tag: forcing 'dvh1' without its DV
+    config boxes makes the mov muxer reject the stream, and 'hvc1' would mislabel it."""
+    assert remuxed_video_tag(create_hevc_mp4(codec_tag="dvh1")) == "hev1"
+
+
 def test_save_to_transcode_skips_undecodable_audio():
     """Streaming transcode keeps the decodable audio track and drops undecodable ones;
     with no decodable audio at all the output is video-only instead of crashing."""
